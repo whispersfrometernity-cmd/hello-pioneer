@@ -1,6 +1,11 @@
 const { Resend } = require('resend')
+const { createClient } = require('@supabase/supabase-js')
 
 const resend = new Resend(process.env.RESEND_API_KEY)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+)
 const APP_URL = 'https://hello-pioneer-tau.vercel.app'
 
 module.exports = async function handler(req, res) {
@@ -8,7 +13,7 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { to, title, content } = req.body
+  const { to, title, content, noteId } = req.body
 
   if (!to || !title || !content) {
     return res.status(400).json({ error: 'Missing required fields' })
@@ -17,6 +22,9 @@ module.exports = async function handler(req, res) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
     return res.status(400).json({ error: 'Invalid email address' })
   }
+
+  const safeTitle   = title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  const safeContent = content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')
 
   const html = `<!DOCTYPE html>
 <html>
@@ -33,8 +41,8 @@ module.exports = async function handler(req, res) {
         </tr>
         <tr>
           <td style="padding:40px;">
-            <h2 style="margin:0 0 16px;font-size:20px;color:#111;">${title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</h2>
-            <p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#333;">${content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>
+            <h2 style="margin:0 0 16px;font-size:20px;color:#111;">${safeTitle}</h2>
+            <p style="margin:0 0 32px;font-size:16px;line-height:1.6;color:#333;">${safeContent}</p>
             <a href="${APP_URL}" style="display:inline-block;padding:12px 24px;background:#000;color:#fff;text-decoration:none;border-radius:4px;font-size:14px;font-weight:500;">View all notes →</a>
           </td>
         </tr>
@@ -49,13 +57,27 @@ module.exports = async function handler(req, res) {
 </body>
 </html>`
 
-  const { error } = await resend.emails.send({
+  const tags = noteId ? [{ name: 'note_id', value: noteId }] : []
+
+  const { data: emailData, error: sendError } = await resend.emails.send({
     from: 'Pioneer Species <onboarding@resend.dev>',
     to: [to],
     subject: `A note was shared with you: "${title}"`,
     html,
+    tags,
   })
 
-  if (error) return res.status(500).json({ error: error.message })
+  if (sendError) return res.status(500).json({ error: sendError.message })
+
+  // Record the sent event (fire-and-forget — don't block the response)
+  if (emailData?.id) {
+    supabase.from('email_events').insert({
+      message_id: emailData.id,
+      note_id:    noteId || null,
+      recipient:  to,
+      event_type: 'sent',
+    }).then()
+  }
+
   return res.status(200).json({ success: true })
 }
